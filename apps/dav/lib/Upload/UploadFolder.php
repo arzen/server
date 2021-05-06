@@ -26,6 +26,7 @@
 namespace OCA\DAV\Upload;
 
 use OCA\DAV\Connector\Sabre\Directory;
+use OCP\Files\Storage\IStorage;
 use Sabre\DAV\Exception\Forbidden;
 use Sabre\DAV\ICollection;
 
@@ -36,9 +37,10 @@ class UploadFolder implements ICollection {
 	/** @var CleanupService */
 	private $cleanupService;
 
-	public function __construct(Directory $node, CleanupService $cleanupService) {
+	public function __construct(Directory $node, CleanupService $cleanupService, IStorage $storage) {
 		$this->node = $node;
 		$this->cleanupService = $cleanupService;
+		$this->storage = $storage;
 	}
 
 	public function createFile($name, $data = null) {
@@ -94,5 +96,9 @@ class UploadFolder implements ICollection {
 
 	public function getLastModified() {
 		return $this->node->getLastModified();
+	}
+
+	public function getStorage() {
+		return $this->storage;
 	}
 }

@@ -24,9 +24,12 @@
 
 namespace OC\Files\ObjectStore;
 
+use Aws\S3\Exception\S3MultipartUploadException;
+use Icewind\Streams\CallbackWrapper;
 use OCP\Files\ObjectStore\IObjectStore;
+use OCP\Files\ObjectStore\IObjectStoreMultiPartUpload;
 
-class S3 implements IObjectStore {
+class S3 implements IObjectStore, IObjectStoreMultiPartUpload {
 	use S3ConnectionTrait;
 	use S3ObjectTrait;
 
@@ -40,5 +43,51 @@ class S3 implements IObjectStore {
 	 */
 	public function getStorageId() {
 		return $this->id;
+	}
+
+	public function initiateMultipartUpload(string $urn): string {
+		$upload = $this->getConnection()->createMultipartUpload([
+			'Bucket' => $this->bucket,
+			'Key' => $urn,
+		]);
+		return $upload->get('UploadId');
+	}
+
+	public function uploadMultipartPart(string $urn, string $uploadId, int $partId, $stream, $size) {
+		return $this->getConnection()->uploadPart([
+			'Body' => $stream,
+			'Bucket' => $this->bucket,
+			'Key' => $urn,
+			'ContentLength' => $size,
+			'PartNumber' => $partId,
+			'UploadId' => $uploadId,
+		]);
+	}
+
+	public function completeMultipartUpload(string $urn, string $uploadId, array $result): int {
+		try {
+			$this->getConnection()->completeMultipartUpload([
+				'Bucket' => $this->bucket,
+				'Key' => $urn,
+				'UploadId' => $uploadId,
+				'MultipartUpload' => ['Parts' => $result],
+			]);
+			$stat = $this->getConnection()->headObject([
+				'Bucket' => $this->bucket,
+				'Key' => $urn,
+			]);
+			return (int)$stat->get('ContentLength');
+		} catch (S3MultipartUploadException $e) {
+			$this->abortMultipartUpload($urn, $uploadId);
+			throw $e;
+		}
+	}
+
+	public function abortMultipartUpload($urn, $uploadId) {
+		$this->getConnection()->abortMultipartUpload([
+			'Bucket' => $this->bucket,
+			'Key' => $urn,
+			'UploadId' => $uploadId
+		]);
 	}
 }

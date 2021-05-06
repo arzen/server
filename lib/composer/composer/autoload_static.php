@@ -323,6 +323,7 @@ class ComposerStaticInit53792487c5a8370acc0b06b1a864ff4c
         'OCP\\Files\\Notify\\INotifyHandler' => __DIR__ . '/../../..' . '/lib/public/Files/Notify/INotifyHandler.php',
         'OCP\\Files\\Notify\\IRenameChange' => __DIR__ . '/../../..' . '/lib/public/Files/Notify/IRenameChange.php',
         'OCP\\Files\\ObjectStore\\IObjectStore' => __DIR__ . '/../../..' . '/lib/public/Files/ObjectStore/IObjectStore.php',
+        'OCP\\Files\\ObjectStore\\IObjectStoreMultiPartUpload' => __DIR__ . '/../../..' . '/lib/public/Files/ObjectStore/IObjectStoreMultiPartUpload.php',
         'OCP\\Files\\ReservedWordException' => __DIR__ . '/../../..' . '/lib/public/Files/ReservedWordException.php',
         'OCP\\Files\\Search\\ISearchBinaryOperator' => __DIR__ . '/../../..' . '/lib/public/Files/Search/ISearchBinaryOperator.php',
         'OCP\\Files\\Search\\ISearchComparison' => __DIR__ . '/../../..' . '/lib/public/Files/Search/ISearchComparison.php',

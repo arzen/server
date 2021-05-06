@@ -27,8 +27,10 @@
 namespace OCA\DAV\Upload;
 
 use OC\Files\Filesystem;
+use OC\Files\ObjectStore\ObjectStoreStorage;
 use OC\Files\View;
 use OCA\DAV\Connector\Sabre\Directory;
+use OCP\Files\ObjectStore\IObjectStoreMultiPartUpload;
 use Sabre\DAV\Exception\Forbidden;
 use Sabre\DAV\ICollection;
 
@@ -56,12 +58,12 @@ class UploadHome implements ICollection {
 	}
 
 	public function getChild($name): UploadFolder {
-		return new UploadFolder($this->impl()->getChild($name), $this->cleanupService);
+		return new UploadFolder($this->impl()->getChild($name), $this->cleanupService, $this->getStorage());
 	}
 
 	public function getChildren(): array {
 		return array_map(function ($node) {
-			return new UploadFolder($node, $this->cleanupService);
+			return new UploadFolder($node, $this->cleanupService, $this->getStorage());
 		}, $this->impl()->getChildren());
 	}
 
@@ -90,14 +92,24 @@ class UploadHome implements ICollection {
 	 * @return Directory
 	 */
 	private function impl() {
+		$view = $this->getView();
+		$rootInfo = $view->getFileInfo('');
+		return new Directory($view, $rootInfo);
+	}
+
+	private function getView() {
 		$rootView = new View();
 		$user = \OC::$server->getUserSession()->getUser();
 		Filesystem::initMountPoints($user->getUID());
 		if (!$rootView->file_exists('/' . $user->getUID() . '/uploads')) {
 			$rootView->mkdir('/' . $user->getUID() . '/uploads');
 		}
-		$view = new View('/' . $user->getUID() . '/uploads');
-		$rootInfo = $view->getFileInfo('');
-		return new Directory($view, $rootInfo);
+		return new View('/' . $user->getUID() . '/uploads');
+	}
+
+	private function getStorage() {
+		$view = $this->getView();
+		$storage = $view->getFileInfo('')->getStorage();
+		return $storage;
 	}
 }

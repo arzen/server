@@ -73,4 +73,12 @@ class UploadFile implements IFile {
 	public function getLastModified() {
 		return $this->file->getLastModified();
 	}
+
+	public function getInternalFileId() {
+		return $this->file->getInternalFileId();
+	}
+
+	public function getPath() {
+		return $this->file->getFileInfo()->getPath();
+	}
 }
