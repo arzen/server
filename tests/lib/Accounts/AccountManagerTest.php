@@ -147,9 +147,9 @@ class AccountManagerTest extends TestCase {
 
 	public function dataTrueFalse() {
 		return [
-			[['newData'], ['oldData'], false, true],
-			[['newData'], [], true, false],
-			[['oldData'], ['oldData'], false, false]
+			[['myProperty' => ['value' => 'newData']], ['myProperty' => ['value' => 'oldData']], false, true],
+			[['myProperty' => ['value' => 'newData']], ['myProperty' => ['value' => '']], true, false],
+			[['myProperty' => ['value' => 'oldData']], ['myProperty' => ['value' => 'oldData']], false, false]
 		];
 	}
 

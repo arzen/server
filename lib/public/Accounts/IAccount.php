@@ -60,7 +60,7 @@ interface IAccount extends \JsonSerializable {
 	public function getProperty(string $property): IAccountProperty;
 
 	/**
-	 * Get all properties of an account
+	 * Get all properties of an account. Array indices are property names.
 	 *
 	 * @since 15.0.0
 	 *
