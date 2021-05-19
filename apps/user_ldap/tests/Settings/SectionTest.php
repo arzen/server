@@ -58,7 +58,7 @@ class SectionTest extends TestCase {
 		$this->l
 			->expects($this->once())
 			->method('t')
-			->with('LDAP / AD integration')
+			->with('LDAP/AD integration')
 			->willReturn('LDAP/AD integration');
 
 		$this->assertSame('LDAP/AD integration', $this->section->getName());
