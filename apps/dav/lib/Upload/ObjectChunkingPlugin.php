@@ -33,6 +33,9 @@ use OCA\DAV\Connector\Sabre\Directory;
 use OCA\DAV\Connector\Sabre\Exception\Forbidden;
 use OCA\DAV\Connector\Sabre\File;
 use OCP\Files\ObjectStore\IObjectStoreMultiPartUpload;
+use OCP\Files\Storage\IChunkedFileWrite;
+use OCP\Files\Storage\IStorage;
+use OCP\Files\StorageInvalidException;
 use Sabre\DAV\Exception\BadRequest;
 use Sabre\DAV\Exception\NotFound;
 use Sabre\DAV\INode;
@@ -48,10 +51,10 @@ class ObjectChunkingPlugin extends ServerPlugin {
 	/** @var UploadFolder */
 	private $uploadFolder;
 
-	const OBJECT_UPLOAD_URN = '{http://nextcloud.org/ns}object-upload-urn';
-	const OBJECT_UPLOAD_UPLOADID = '{http://nextcloud.org/ns}object-upload-uploadid';
-	const OBJECT_UPLOAD_PARTID = '{http://nextcloud.org/ns}object-upload-partid';
-	const OBJECT_UPLOAD_ETAG = '{http://nextcloud.org/ns}object-upload-etag';
+	private const TEMP_TARGET = '.target';
+
+	const OBJECT_UPLOAD_TARGET = '{http://nextcloud.org/ns}upload-target';
+	const OBJECT_UPLOAD_UPLOADID = '{http://nextcloud.org/ns}upload-uploadid';
 
 	const OBJECT_UPLOAD_HEADER = 'X-Nextcloud-Object-Chunking';
 	const OBJECT_UPLOAD_DESTINATION_HEADER = 'X-Nextcloud-Object-Destination';
@@ -63,161 +66,131 @@ class ObjectChunkingPlugin extends ServerPlugin {
 		$server->on('afterMethod:MKCOL', [$this, 'beforeMkcol']);
 		$server->on('beforeMethod:PUT', [$this, 'beforePut'], 200);	// Different priority to call after the custom properties backend is registered
 		$server->on('beforeMove', [$this, 'beforeMove'], 90);
-
 		$this->server = $server;
-	}
-
-	private function checkPrerequisites() {
-		if (!$this->uploadFolder instanceof UploadFolder || !$this->server->httpRequest->getHeader(self::OBJECT_UPLOAD_HEADER)) {
-			return false;
-		}
-		$multipartUploader = $this->getMultipartStorage();
-		$storage = $this->getStorage();
-		return $multipartUploader !== null && $storage !== null;
 	}
 
 	public function beforeMkcol(RequestInterface $request, ResponseInterface $response) {
 		$this->uploadFolder = $this->server->tree->getNodeForPath($request->getPath());
-		if (!$this->checkPrerequisites() || !$this->server->httpRequest->getHeader(self::OBJECT_UPLOAD_DESTINATION_HEADER)) {
+		try {
+			$this->checkPrerequisites();
+			$storage = $this->getStorage();
+		} catch (StorageInvalidException|BadRequest $e) {
 			return true;
 		}
 
-		$this->uploadFolder->createFile('.multipart');
+		// TODO: If the target is not set we could still copy the file during the move then as a fallback
+		if (!$this->server->httpRequest->getHeader(self::OBJECT_UPLOAD_DESTINATION_HEADER)) {
+			return true;
+		}
+
 		try {
 			$targetFile = $this->server->tree->getNodeForPath($request->getHeader(self::OBJECT_UPLOAD_DESTINATION_HEADER));
 		} catch (NotFound $e) {
-			$targetFile = $this->uploadFolder->getChild('.multipart');
+			$this->uploadFolder->createFile(self::TEMP_TARGET);
+			$targetFile = $this->uploadFolder->getChild(self::TEMP_TARGET);
 		}
 
-		$multipartUploader = $this->getMultipartStorage();
-		$storage = $this->getStorage();
-		$uploadId = $multipartUploader->initiateMultipartUpload($storage->getURN($targetFile->getInternalFileId()));
+		$targetPath = $targetFile->getInternalPath();
+		$uploadId = $storage->beginChunkedFile($targetPath);
+
+		// DAV properties on the UploadFolder are used in order to properly cleanup stale chunked file writes and to persist the target path
 		$this->server->updateProperties($request->getPath(), [
 			self::OBJECT_UPLOAD_UPLOADID => $uploadId,
-			self::OBJECT_UPLOAD_URN => $storage->getURN((int)$targetFile->getInternalFileId())
+			self::OBJECT_UPLOAD_TARGET => $targetPath,
 		]);
 
+		$response->setStatus(201);
 		return true;
 	}
 
 	public function beforePut(RequestInterface $request, ResponseInterface $response) {
 		$this->uploadFolder = $this->server->tree->getNodeForPath(dirname($request->getPath()));
-		if (!$this->checkPrerequisites()) {
+		try {
+			$this->checkPrerequisites();
+			$storage = $this->getStorage();
+		} catch (StorageInvalidException|BadRequest $e) {
 			return true;
 		}
 
-		$multipartUploader = $this->getMultipartStorage();
-		$properties = $this->server->getProperties(dirname($request->getPath()) . '/', [ self::OBJECT_UPLOAD_UPLOADID, self::OBJECT_UPLOAD_URN ]);
-		$urn = $properties[self::OBJECT_UPLOAD_URN];
+		$properties = $this->server->getProperties(dirname($request->getPath()) . '/', [ self::OBJECT_UPLOAD_UPLOADID, self::OBJECT_UPLOAD_TARGET ]);
+		$targetPath = $properties[self::OBJECT_UPLOAD_TARGET];
 		$uploadId = $properties[self::OBJECT_UPLOAD_UPLOADID];
 		$partId = (int)basename($request->getPath());
+
 		if (!($partId >= 1 && $partId <= 10000)) {
 			throw new BadRequest('Invalid chunk id');
 		}
 
-		$stream = $request->getBodyAsStream();
-		$result = $multipartUploader->uploadMultipartPart($urn, $uploadId, basename($request->getPath()), $stream, $request->getHeader('Content-Length'));
-
-		// Create a fake chunk file so we can store the metadata
-		$_SERVER['CONTENT_LENGTH'] = 0;
-		$this->uploadFolder->createFile(basename($request->getPath()));
-
-		$this->server->updateProperties($request->getPath(), [
-			self::OBJECT_UPLOAD_PARTID => $partId,
-			self::OBJECT_UPLOAD_ETAG => trim($result->get('ETag'), '"')
-		]);
-		$this->server->httpResponse->setStatus(201);
+		$storage->putChunkedFilePart($targetPath, $uploadId, (string)$partId, $request->getBodyAsStream(), $request->getHeader('Content-Length'));
+		$response->setStatus(201);
 		return false;
 	}
 
 	public function beforeMove($sourcePath, $destination) {
 		$this->uploadFolder = $this->server->tree->getNodeForPath(dirname($sourcePath));
-		if (!$this->checkPrerequisites()) {
+		try {
+			$this->checkPrerequisites();
+			$this->getStorage();
+		} catch (StorageInvalidException|BadRequest $e) {
 			return true;
 		}
-
-		$request = $this->server->httpRequest;
-		$multipartUploader = $this->getMultipartStorage();
-		$storage = $this->getStorage();
-		$properties = $this->server->getProperties(dirname($request->getPath()) . '/', [self::OBJECT_UPLOAD_UPLOADID, self::OBJECT_UPLOAD_URN]);
-		$urn = $properties[self::OBJECT_UPLOAD_URN];
+		$properties = $this->server->getProperties(dirname($sourcePath) . '/', [ self::OBJECT_UPLOAD_UPLOADID, self::OBJECT_UPLOAD_TARGET ]);
+		$targetPath = $properties[self::OBJECT_UPLOAD_TARGET];
 		$uploadId = $properties[self::OBJECT_UPLOAD_UPLOADID];
 
-		try {
-			$props = $this->server->getPropertiesForChildren(dirname($request->getPath()), [
-				self::OBJECT_UPLOAD_PARTID,
-				self::OBJECT_UPLOAD_ETAG
-			]);
-			$parts = array_filter($props, function ($value, $key) {
-				return substr_compare($key, '/.file', -\strlen('/.file')) !== 0 &&
-					substr_compare($key, '/.multipart', -\strlen('/.multipart')) !== 0;
-			}, ARRAY_FILTER_USE_BOTH);
-			ksort($parts);
-			$partData = array_map(function ($props) {
-				return [
-					'ETag' => $props[self::OBJECT_UPLOAD_ETAG],
-					'PartNumber' => $props[self::OBJECT_UPLOAD_PARTID]
-				];
-			}, $parts);
+		list($destinationDir, $destinationName) = \Sabre\Uri\split($destination);
+		/** @var Directory $destinationParent */
+		$destinationParent = $this->server->tree->getNodeForPath($destinationDir);
+		$destinationExists = $destinationParent->childExists($destinationName);
+		$destinationInView = $destinationParent->getFileInfo()->getPath() . '/' . $destinationName;
 
-			$rootView = new View();
-			$sourceInView = $this->server->tree->getNodeForPath(dirname($sourcePath))->getChild('.multipart')->getPath();
-
-			list($destinationDir, $destinationName) = \Sabre\Uri\split($destination);
-			/** @var Directory $destinationParent */
-			$destinationParent = $this->server->tree->getNodeForPath($destinationDir);
-			$destinationExists = $destinationParent->childExists($destinationName);
-			$destinationInView = $destinationParent->getFileInfo()->getPath() . '/' . $destinationName;
-
-			if ($destinationExists) {
-				$rootView->file_put_contents($destinationInView, ''); // FIXME: Workaround to trigger version creation through pre hooks
+		$rootView = new View();
+		// FIXME find a cleaner way to trigger the locking and hooks
+		$rootView->file_put_contents($destinationInView, function ($storage, $pathInStorage) use ($targetPath, $uploadId) {
+			try {
+				$storage->writeChunkedFile($targetPath, $uploadId);
+			} catch (\Exception $e) {
+				return false;
 			}
-			$multipartUploadSize = $multipartUploader->completeMultipartUpload($urn, $uploadId, array_values($partData));
-			if (!$destinationExists) {
-				$rootView->rename(dirname($sourceInView) . '/.multipart', $destinationInView);
-			}
-
-			$destinationInView = $this->server->tree->getNodeForPath($destination)->getFileInfo()->getPath();
-
-			$mimetypeDetector = \OC::$server->getMimeTypeDetector();
-			$mimetype = $mimetypeDetector->detectPath($destinationInView);
-			$destinationFileInfo = $rootView->getFileInfo($destinationInView);
-			$storage->getCache()->update($destinationFileInfo->getId(), [
-				'size' => $multipartUploadSize,
-				'mimetype' => $mimetype,
-				'etag' => $storage->getETag($destinationFileInfo->getInternalPath())
-			]);
-		} catch (\Exception $e) {
-			$multipartUploader->abortMultipartUpload($urn, $uploadId);
-			throw $e;
-		} finally {
-			$sourceNode = $this->server->tree->getNodeForPath($sourcePath);
-			if ($sourceNode instanceof FutureFile) {
-				$sourceNode->delete();
-			}
-
-			$this->server->emit('afterMove', [$sourcePath, $destination]);
-			$this->server->emit('afterUnbind', [$sourcePath]);
-			$this->server->emit('afterBind', [$destination]);
-
-			$response = $this->server->httpResponse;
-			$response->setHeader('Content-Length', '0');
-			$response->setStatus($destinationExists ? 204 : 201);
+			return true;
+		});
+		if (!$destinationExists) {
+			$tempFile = $this->server->tree->getNodeForPath(dirname($sourcePath))->getChild(self::TEMP_TARGET);
+			$rootView->rename($tempFile->getFile()->getFileInfo()->getPath(), $destinationInView);
 		}
+
+		$sourceNode = $this->server->tree->getNodeForPath($sourcePath);
+		if ($sourceNode instanceof FutureFile) {
+			$sourceNode->delete();
+		}
+
+		$this->server->emit('afterMove', [$sourcePath, $destination]);
+		$this->server->emit('afterUnbind', [$sourcePath]);
+		$this->server->emit('afterBind', [$destination]);
+
+		$response = $this->server->httpResponse;
+		$response->setHeader('Content-Length', '0');
+		$response->setStatus($destinationExists ? 204 : 201);
 		return false;
 	}
 
-	private function getMultipartStorage() {
-		$storage = $this->getStorage();
-		if (!$storage) {
-			return null;
+	private function checkPrerequisites() {
+		if (!$this->uploadFolder instanceof UploadFolder || !$this->server->httpRequest->getHeader(self::OBJECT_UPLOAD_HEADER)) {
+			throw new BadRequest('Object upload header not set');
 		}
-		$objectStore = $storage->getObjectStore();
-		return $objectStore instanceof IObjectStoreMultiPartUpload ? $objectStore : null;
 	}
 
-	private function getStorage() {
+	/**
+	 * @return IChunkedFileWrite
+	 * @throws BadRequest
+	 * @throws StorageInvalidException
+	 */
+	private function getStorage(): IStorage {
+		$this->checkPrerequisites();
 		$storage = $this->uploadFolder->getStorage();
-		return $storage->instanceOfStorage(ObjectStoreStorage::class) ? $storage : null;
+		if (!$storage->instanceOfStorage(IChunkedFileWrite::class)) {
+			throw new StorageInvalidException('Storage does not support chunked file write');
+		}
+		return $storage;
 	}
 }

@@ -642,12 +642,12 @@ class View {
 
 	/**
 	 * @param string $path
-	 * @param string|resource $data
+	 * @param string|resource|callable $data
 	 * @return bool|mixed
 	 * @throws LockedException
 	 */
 	public function file_put_contents($path, $data) {
-		if (is_resource($data)) { //not having to deal with streams in file_put_contents makes life easier
+		if (is_resource($data) || is_callable($data)) { //not having to deal with streams in file_put_contents makes life easier
 			$absolutePath = Filesystem::normalizePath($this->getAbsolutePath($path));
 			if (Filesystem::isValidPath($path)
 				and !Filesystem::isFileBlacklisted($path)
@@ -676,12 +676,8 @@ class View {
 
 				/** @var \OC\Files\Storage\Storage $storage */
 				[$storage, $internalPath] = $this->resolvePath($path);
-				$target = $storage->fopen($internalPath, 'w');
-				if ($target) {
-					[, $result] = \OC_Helper::streamCopy($data, $target);
-					fclose($target);
-					fclose($data);
-
+				if (is_callable($data)) {
+					$result = $data($storage, $internalPath);
 					$this->writeUpdate($storage, $internalPath);
 
 					$this->changeLock($path, ILockingProvider::LOCK_SHARED);
@@ -692,8 +688,25 @@ class View {
 					$this->unlockFile($path, ILockingProvider::LOCK_SHARED);
 					return $result;
 				} else {
-					$this->unlockFile($path, ILockingProvider::LOCK_EXCLUSIVE);
-					return false;
+					$target = $storage->fopen($internalPath, 'w');
+					if ($target) {
+						[, $result] = \OC_Helper::streamCopy($data, $target);
+						fclose($target);
+						fclose($data);
+
+						$this->writeUpdate($storage, $internalPath);
+
+						$this->changeLock($path, ILockingProvider::LOCK_SHARED);
+
+						if ($this->shouldEmitHooks($path) && $result !== false) {
+							$this->emit_file_hooks_post($exists, $path);
+						}
+						$this->unlockFile($path, ILockingProvider::LOCK_SHARED);
+						return $result;
+					} else {
+						$this->unlockFile($path, ILockingProvider::LOCK_EXCLUSIVE);
+						return false;
+					}
 				}
 			} else {
 				return false;

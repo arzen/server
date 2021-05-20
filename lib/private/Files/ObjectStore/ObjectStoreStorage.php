@@ -30,20 +30,25 @@
 
 namespace OC\Files\ObjectStore;
 
+use Aws\S3\Exception\S3MultipartUploadException;
 use Icewind\Streams\CallbackWrapper;
 use Icewind\Streams\CountWrapper;
 use Icewind\Streams\IteratorDirectory;
 use OC\Files\Cache\Cache;
 use OC\Files\Cache\CacheEntry;
 use OC\Files\Storage\PolyFill\CopyDirectory;
+use OC\Memcache\ArrayCache;
+use OC\Memcache\NullCache;
 use OCP\Files\Cache\ICacheEntry;
 use OCP\Files\FileInfo;
+use OCP\Files\GenericFileException;
 use OCP\Files\NotFoundException;
 use OCP\Files\ObjectStore\IObjectStore;
-use OCP\Files\ObjectStore\IObjectStoreMultiPartUpload;
+use OCP\Files\Storage\IChunkedFileWrite;
 use OCP\Files\Storage\IStorage;
+use OCP\ICache;
 
-class ObjectStoreStorage extends \OC\Files\Storage\Common {
+class ObjectStoreStorage extends \OC\Files\Storage\Common implements IChunkedFileWrite {
 	use CopyDirectory;
 
 	/**
@@ -62,6 +67,9 @@ class ObjectStoreStorage extends \OC\Files\Storage\Common {
 	private $objectPrefix = 'urn:oid:';
 
 	private $logger;
+
+	/** @var ICache */
+	private $uploadCache;
 
 	public function __construct($params) {
 		if (isset($params['objectstore']) && $params['objectstore'] instanceof IObjectStore) {
@@ -83,6 +91,7 @@ class ObjectStoreStorage extends \OC\Files\Storage\Common {
 		}
 
 		$this->logger = \OC::$server->getLogger();
+		$this->uploadCache = \OC::$server->getMemCacheFactory()->createDistributed('objectstore');
 	}
 
 	public function mkdir($path) {
@@ -598,4 +607,82 @@ class ObjectStoreStorage extends \OC\Files\Storage\Common {
 			throw $e;
 		}
 	}
+
+	public function beginChunkedFile(string $targetPath): string {
+		$this->validateUploadCache();
+		$cacheEntry = $this->getCache()->get($targetPath);
+		$urn = $this->getURN($cacheEntry->getId());
+		$uploadId = $this->objectStore->initiateMultipartUpload($urn);
+		$this->uploadCache->set($this->getUploadCacheKey($urn, $uploadId, 'uploadId'), $uploadId);
+		return $uploadId;
+	}
+
+	public function putChunkedFilePart(string $targetPath, string $writeToken, string $chunkId, $data, $size = null): void {
+		$this->validateUploadCache();
+		$cacheEntry = $this->getCache()->get($targetPath);
+		$urn = $this->getURN($cacheEntry->getId());
+		$uploadId = $this->uploadCache->get($this->getUploadCacheKey($urn, $writeToken, 'uploadId'));
+
+		$result = $this->objectStore->uploadMultipartPart($urn, $uploadId, $chunkId, $data, $size);
+
+		$parts = $this->uploadCache->get($this->getUploadCacheKey($urn, $uploadId, 'parts'));
+		if (!$parts) {
+			$parts = [];
+		}
+		$parts[$chunkId] = [
+			'PartNumber' => $chunkId,
+			'ETag' => trim($result->get('ETag'), '"')
+		];
+		$this->uploadCache->set($this->getUploadCacheKey($urn, $uploadId, 'parts'), $parts);
+	}
+
+	public function writeChunkedFile(string $targetPath, string $writeToken): int {
+		$this->validateUploadCache();
+		$cacheEntry = $this->getCache()->get($targetPath);
+		$urn = $this->getURN($cacheEntry->getId());
+		$uploadId = $this->uploadCache->get($this->getUploadCacheKey($urn, $writeToken, 'uploadId'));
+		$parts = $this->uploadCache->get($this->getUploadCacheKey($urn, $uploadId, 'parts'));
+		try {
+			$size = $this->objectStore->completeMultipartUpload($urn, $uploadId, array_values($parts));
+			$stat = $this->stat($targetPath);
+			$mtime = time();
+			if (is_array($stat)) {
+				$stat['size'] = $size;
+				$stat['mtime'] = $mtime;
+				$stat['mimetype'] = $this->getMimeType($targetPath);
+				$this->getCache()->update($stat['fileid'], $stat);
+			}
+		} catch (S3MultipartUploadException $e) {
+			$this->objectStore->abortMultipartUpload($urn, $uploadId);
+			throw $e;
+		} finally {
+			$this->clearCache($urn, $uploadId);
+		}
+		return $size;
+	}
+
+	public function cancelChunkedFile(string $targetPath, string $writeToken): void {
+		$this->validateUploadCache();
+		$cacheEntry = $this->getCache()->get($targetPath);
+		$urn = $this->getURN($cacheEntry->getId());
+		$uploadId = $this->uploadCache->get($this->getUploadCacheKey($urn, $writeToken, 'uploadId'));
+		$this->objectStore->abortMultipartUpload($urn, $uploadId);
+		$this->clearCache($urn, $uploadId);
+	}
+
+	private function validateUploadCache() {
+		if ($this->uploadCache instanceof NullCache || $this->uploadCache instanceof ArrayCache) {
+			throw new GenericFileException('ChunkedFileWrite not available: A cross-request persistent cache is required');
+		}
+	}
+
+	private function getUploadCacheKey($urn, $uploadId, $chunkId = null) {
+		return $urn . '-' . $uploadId . '-' . ($chunkId ? $chunkId . '-' : '');
+	}
+
+	private function clearCache($urn, $uploadId) {
+		$this->uploadCache->clear($this->getUploadCacheKey($urn, $uploadId));
+	}
+
+
 }

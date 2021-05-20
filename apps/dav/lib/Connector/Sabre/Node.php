@@ -248,6 +248,10 @@ abstract class Node implements \Sabre\DAV\INode {
 		return $this->info->getId();
 	}
 
+	public function getInternalPath() {
+		return $this->info->getInternalPath();
+	}
+
 	/**
 	 * @param string $user
 	 * @return int

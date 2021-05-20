@@ -65,25 +65,20 @@ class S3 implements IObjectStore, IObjectStoreMultiPartUpload {
 	}
 
 	public function completeMultipartUpload(string $urn, string $uploadId, array $result): int {
-		try {
-			$this->getConnection()->completeMultipartUpload([
-				'Bucket' => $this->bucket,
-				'Key' => $urn,
-				'UploadId' => $uploadId,
-				'MultipartUpload' => ['Parts' => $result],
-			]);
-			$stat = $this->getConnection()->headObject([
-				'Bucket' => $this->bucket,
-				'Key' => $urn,
-			]);
-			return (int)$stat->get('ContentLength');
-		} catch (S3MultipartUploadException $e) {
-			$this->abortMultipartUpload($urn, $uploadId);
-			throw $e;
-		}
+		$this->getConnection()->completeMultipartUpload([
+			'Bucket' => $this->bucket,
+			'Key' => $urn,
+			'UploadId' => $uploadId,
+			'MultipartUpload' => ['Parts' => $result],
+		]);
+		$stat = $this->getConnection()->headObject([
+			'Bucket' => $this->bucket,
+			'Key' => $urn,
+		]);
+		return (int)$stat->get('ContentLength');
 	}
 
-	public function abortMultipartUpload($urn, $uploadId) {
+	public function abortMultipartUpload($urn, $uploadId): void {
 		$this->getConnection()->abortMultipartUpload([
 			'Bucket' => $this->bucket,
 			'Key' => $urn,

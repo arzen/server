@@ -24,17 +24,17 @@
 declare(strict_types=1);
 
 
-namespace OCP\Files\ObjectStore;
+namespace OCP\Files\Storage;
 
 
-interface IObjectStoreMultiPartUpload {
+interface IChunkedFileWrite {
 
-	public function initiateMultipartUpload(string $urn): string;
+	public function beginChunkedFile(string $targetPath): string;
 
-	public function uploadMultipartPart(string $urn, string $uploadId, int $partId, $stream, $size);
+	public function putChunkedFilePart(string $targetPath, string $writeToken, string $chunkId, $data, $size = null): void;
 
-	public function completeMultipartUpload(string $urn, string $uploadId, array $result): int;
+	public function writeChunkedFile(string $targetPath, string $writeToken): int;
 
-	public function abortMultipartUpload(string $urn, string $uploadId): void;
+	public function cancelChunkedFile(string $targetPath, string $writeToken): void;
 
 }

@@ -78,7 +78,11 @@ class UploadFile implements IFile {
 		return $this->file->getInternalFileId();
 	}
 
-	public function getPath() {
-		return $this->file->getFileInfo()->getPath();
+	public function getFile() {
+		return $this->file;
+	}
+
+	public function getInternalPath() {
+		return $this->file->getFileInfo()->getInternalPath();
 	}
 }
